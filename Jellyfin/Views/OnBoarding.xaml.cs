@@ -29,11 +29,6 @@ namespace Jellyfin.Views
 
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
-            await BtnConnect_ClickAsync();
-        }
-
-        private async Task BtnConnect_ClickAsync()
-        {
             btnConnect.IsEnabled = false;
             txtError.Visibility = Visibility.Collapsed;
 
