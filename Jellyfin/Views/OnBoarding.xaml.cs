@@ -1,7 +1,8 @@
 ﻿using Jellyfin.Core;
 using Jellyfin.Helpers;
 using System;
-using System.Net;
+using System.Net.Http;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
@@ -14,7 +15,6 @@ namespace Jellyfin.Views
     /// </summary>
     public sealed partial class OnBoarding : Page
     {
-        // Constructor
         public OnBoarding()
         {
             this.InitializeComponent();
@@ -35,7 +35,7 @@ namespace Jellyfin.Views
             string inputUrl = txtUrl.Text;
 
             // Parse the input URL to validate and normalize it.
-            var (isValid, normalizedUrl, errorMessage) = UrlValidator.ParseServerUri(inputUrl);
+            var (isValid, parsedUri, errorMessage) = UrlValidator.ParseServerUri(inputUrl);
             if (!isValid)
             {
                 txtError.Text = errorMessage;
@@ -44,15 +44,17 @@ namespace Jellyfin.Views
                 return;
             }
 
-            if (!await IsJellyfinServerUrlValidAsync(normalizedUrl))
+            // Check if the parsed URI is pointing to a Jellyfin server.
+            if (!await IsJellyfinServerUrlValidAsync(parsedUri))
             {
                 txtError.Visibility = Visibility.Visible;
+                btnConnect.IsEnabled = true;
+                return;
             }
-            else
-            {
-                Central.Settings.JellyfinServer = normalizedUrl.ToString();
-                (Window.Current.Content as Frame).Navigate(typeof(MainPage));
-            }
+
+            // Save validated URL and navigate to page containing the web view.
+            Central.Settings.JellyfinServer = parsedUri.ToString();
+            (Window.Current.Content as Frame).Navigate(typeof(MainPage));
 
             btnConnect.IsEnabled = true;
         }
@@ -69,75 +71,95 @@ namespace Jellyfin.Views
         /// Asynchronously validates whether the specified URL points to a valid Jellyfin server.
         /// </summary>
         /// <param name="serverUri">The URL to validate as a string.</param>
-        /// <returns><see langword="true"/> if the URL is valid and points to a Jellyfin server; otherwise, <see
+        /// <returns><see langword="true"/> if the URL is valid and pointing to a Jellyfin server; otherwise, <see
         /// langword="false"/>.</returns>
         private async Task<bool> IsJellyfinServerUrlValidAsync(Uri serverUri)
         {
-            // check URL exists
-            HttpWebRequest request;
-            HttpWebResponse response;
             try
             {
-                request = (HttpWebRequest)WebRequest.Create(serverUri);
-                response = (HttpWebResponse)(await request.GetResponseAsync());
+                using var httpClient = new HttpClient
+                {
+                    Timeout = TimeSpan.FromSeconds(10)
+                };
+
+                var headRequest = new HttpRequestMessage(HttpMethod.Head, serverUri);
+                var headResponse = await httpClient.SendAsync(headRequest).ConfigureAwait(true);
+                var finalUri = headResponse.RequestMessage.RequestUri;
+
+                // Jellyfin redirects to "/web" which is not a valid base path for the API.
+                string basePath = finalUri.ToString().TrimEnd('/');
+                if (basePath.EndsWith("/web", StringComparison.OrdinalIgnoreCase))
+                {
+                    basePath = basePath.Substring(0, basePath.Length - "/web".Length);
+                }
+
+                var infoUri = new Uri(basePath + "/System/Info/Public");
+
+                var response = await httpClient.GetAsync(infoUri).ConfigureAwait(true);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    UpdateErrorMessage((int)response.StatusCode);
+                    return false;
+                }
+
+                var content = await response.Content.ReadAsStringAsync();
+
+                // Check if the response is a Jellyfin server response.
+                if (!IsJellyfinServerResponse(content))
+                {
+                    txtError.Visibility = Visibility.Visible;
+                    txtError.Text = "Jellyfin server not found, is it online?";
+                    return false;
+                }
             }
-            catch (WebException ex)
+            catch (HttpRequestException ex)
             {
-                // Handle web exceptions here
-                if (ex.Response != null && ex.Response is HttpWebResponse errorResponse)
-                {
-                    int statusCode = (int)errorResponse.StatusCode;
-                    if (statusCode >= 300 && statusCode <= 308)
-                    {
-                        // Handle Redirect
-                        string newLocation = errorResponse.Headers["Location"];
-                        if (!string.IsNullOrEmpty(newLocation))
-                        {
-                            Uri newUri;
-                            try
-                            {
-                                newUri = new Uri(serverUri, newLocation);
-                            }
-                            catch (UriFormatException)
-                            {
-                                txtError.Visibility = Visibility.Visible;
-                                txtError.Text = "Invalid redirect URL received from server in Location header.";
-                                btnConnect.IsEnabled = true;
-                                return false;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        UpdateErrorMessage(statusCode);
-                    }
-                    return false;
-                }
-                else
-                {
-                    // Handle other exceptions
-                    return false;
-                }
+                txtError.Visibility = Visibility.Visible;
+                txtError.Text = $"Could not connect to the server at \"{serverUri}\". Error: {ex.Message}";
+                return false;
+            }
+            catch (OperationCanceledException)
+            {
+                txtError.Visibility = Visibility.Visible;
+                txtError.Text = "The request timed out. Please check your network connection and try again.";
+                return false;
+            }
+            catch (Exception ex) // Catch any other unexpected exceptions.
+            {
+                txtError.Visibility = Visibility.Visible;
+                txtError.Text = $"An unexpected error occurred: {ex.Message}";
+                return false;
             }
 
-            if (response == null || response.StatusCode != HttpStatusCode.OK)
+            return true;
+        }
+
+        /// <summary>
+        /// Determines whether the provided JSON string represents a response from a Jellyfin Server.
+        /// </summary>
+        /// <param name="jsonContent">The JSON response string to evaluate.</param>
+        /// <returns><see langword="true"/> if the response is from a Jellyfin Server; otherwise, 
+        /// <see langword="false"/>.</returns>
+        private static bool IsJellyfinServerResponse(string jsonContent)
+        {
+            try
+            {
+                using var json = JsonDocument.Parse(jsonContent);
+
+                // Making sure we are talking with a Jellyfin server.
+                if (json.RootElement.TryGetProperty("ProductName", out var productNameProperty))
+                {
+                    string productName = productNameProperty.GetString();
+                    return string.Equals(productName, "Jellyfin Server", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch (Exception)
             {
                 return false;
             }
 
-            var encoding = System.Text.Encoding.GetEncoding(response.CharacterSet);
-            using (var reader = new System.IO.StreamReader(response.GetResponseStream(), encoding))
-            {
-                string responseText = reader.ReadToEnd();
-                if (!responseText.Contains("Jellyfin"))
-                {
-                    return false;
-                }
-            }
-
-            // If everything is OK, update the URI before saving it
-            Central.Settings.JellyfinServer = serverUri.ToString();
-            return true;
+            return false;
         }
 
         private void UpdateErrorMessage(int statusCode)
