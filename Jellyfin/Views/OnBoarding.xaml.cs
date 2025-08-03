@@ -15,6 +15,10 @@ namespace Jellyfin.Views
     /// </summary>
     public sealed partial class OnBoarding : Page
     {
+        private const string WebUIBasePath = "/web/";
+        private const string ApiSystemInfoRoute = "/System/Info/Public";
+        private const string ValidProductName = "Jellyfin Server";
+
         public OnBoarding()
         {
             this.InitializeComponent();
@@ -82,20 +86,20 @@ namespace Jellyfin.Views
                     Timeout = TimeSpan.FromSeconds(10)
                 };
 
-                var headRequest = new HttpRequestMessage(HttpMethod.Head, serverUri);
-                var headResponse = await httpClient.SendAsync(headRequest).ConfigureAwait(true);
+                using var headRequest = new HttpRequestMessage(HttpMethod.Head, serverUri);
+                using var headResponse = await httpClient.SendAsync(headRequest).ConfigureAwait(true);
                 var finalUri = headResponse.RequestMessage.RequestUri;
 
-                // Jellyfin redirects to "/web" which is not a valid base path for the API.
-                string basePath = finalUri.ToString().TrimEnd('/');
-                if (basePath.EndsWith("/web", StringComparison.OrdinalIgnoreCase))
+                // Jellyfin redirects to a web root path, which is not a valid base path for the API.
+                string basePath = finalUri.ToString();
+                if (basePath.EndsWith(WebUIBasePath, StringComparison.OrdinalIgnoreCase))
                 {
-                    basePath = basePath.Substring(0, basePath.Length - "/web".Length);
+                    basePath = basePath.Substring(0, basePath.Length - WebUIBasePath.Length);
                 }
 
-                var infoUri = new Uri(basePath + "/System/Info/Public");
+                var infoUri = new Uri(basePath + ApiSystemInfoRoute);
 
-                var response = await httpClient.GetAsync(infoUri).ConfigureAwait(true);
+                using var response = await httpClient.GetAsync(infoUri).ConfigureAwait(true);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -151,7 +155,7 @@ namespace Jellyfin.Views
                 if (json.RootElement.TryGetProperty("ProductName", out var productNameProperty))
                 {
                     string productName = productNameProperty.GetString();
-                    return string.Equals(productName, "Jellyfin Server", StringComparison.OrdinalIgnoreCase);
+                    return string.Equals(productName, ValidProductName, StringComparison.OrdinalIgnoreCase);
                 }
             }
             catch (Exception)
